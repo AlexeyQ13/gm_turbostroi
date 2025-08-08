@@ -1,4 +1,4 @@
-﻿#include "gmsv_turbostroi_win32.h"
+#include "gmsv_turbostroi_win32.h"
 
 #include "lua.hpp"
 
@@ -15,6 +15,9 @@ using namespace GarrysMod::Lua;
 #include <boost/lockfree/policies.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/unordered_map.hpp>
+#include <boost/thread/shared_mutex.hpp>
+#include <vector>
+#include <string>
 
 //SourceSDK
 #include <GarrysMod/FactoryLoader.hpp>
@@ -82,12 +85,13 @@ static void stackDump(lua_State *L) {
 //------------------------------------------------------------------------------
 #define BUFFER_SIZE 131072
 #define QUEUE_SIZE 32768
-double target_time = 0.0;
+boost::atomic<double> target_time(0.0);
 double rate = 100.0; //FPS
 char metrostroiSystemsList[BUFFER_SIZE] = { 0 };
 char loadSystemsList[BUFFER_SIZE] = { 0 };
 int SimThreadAffinityMask = 0;
-std::map<int, IServerNetworkable*> trains_pos;
+boost::unordered_map<int, IServerNetworkable*> trains_pos;
+static boost::shared_mutex trains_pos_mutex;
 boost::unordered_map<std::string, std::string> load_files_cache;
 
 typedef struct {
@@ -101,12 +105,13 @@ typedef struct {
 struct thread_userdata {
 	double current_time;
 	lua_State* L;
-	int finished;
+	boost::atomic<bool> finished;
 
 	boost::lockfree::spsc_queue<thread_msg> thread_to_sim, sim_to_thread;
 
 	thread_userdata() : thread_to_sim(1024), sim_to_thread(1024) //256
 	{
+		finished.store(false);
 	}
 };
 
@@ -120,12 +125,13 @@ typedef struct {
 struct rn_thread_userdata {
 	double current_time;
 	lua_State* L;
-	int finished;
+	boost::atomic<bool> finished;
 
 	boost::lockfree::spsc_queue<rn_thread_msg> thread_to_sim, sim_to_thread;
 
 	rn_thread_userdata() : thread_to_sim(256), sim_to_thread(256) //256
 	{
+		finished.store(false);
 	}
 };
 
@@ -138,7 +144,7 @@ rn_thread_userdata* rn_userdata = NULL;
 // Turbostroi sim thread API
 //------------------------------------------------------------------------------
 
-boost::lockfree::queue <shared_message, boost::lockfree::fixed_sized<true>, boost::lockfree::capacity<64>> printMessages;
+boost::lockfree::queue <shared_message, boost::lockfree::fixed_sized<true>, boost::lockfree::capacity<256>> printMessages;
 int shared_print(lua_State* L) {
 	int n = lua_gettop(L);
 	int i;
@@ -175,7 +181,9 @@ int shared_print(lua_State* L) {
 	char tempbuffer[512] = { 0 };
 	strncat(tempbuffer, buffer, (512 - 1) - strlen(buffer));
 	strcpy(msg.message, tempbuffer);
-	printMessages.push(msg);
+	if (!printMessages.push(msg)) {
+		// drop message if queue is full
+	}
 	return 0;
 }
 
@@ -289,14 +297,14 @@ int thread_rnrecvmessages(lua_State* state) {
 // --- v2 Turbostroi Logic
 void threadSimulation(thread_userdata* userdata) {
 	lua_State* L = userdata->L;
-	boost::chrono::process_real_cpu_clock::time_point p = boost::chrono::time_point_cast<boost::chrono::milliseconds>(boost::chrono::process_real_cpu_clock::now());
+	boost::chrono::steady_clock::time_point p = boost::chrono::steady_clock::now();
 
-	while (userdata && !userdata->finished) {
+	while (userdata && !userdata->finished.load()) {
 		lua_settop(L,0);
 
 		//Simulate one step
-		if (userdata->current_time < target_time) {
-			userdata->current_time = target_time;
+		if (userdata->current_time < target_time.load()) {
+			userdata->current_time = target_time.load();
 			lua_pushnumber(L, Plat_FloatTime());
 			lua_setglobal(L, "CurrentTime");
 
@@ -327,7 +335,8 @@ void threadSimulation(thread_userdata* userdata) {
 			}
 		}
 
-		boost::this_thread::sleep_for(boost::chrono::milliseconds((int)(1000 / rate)));
+		p += boost::chrono::milliseconds((int)(1000 / rate));
+		boost::this_thread::sleep_until(p);
 	}
 
 	//Release resources
@@ -340,26 +349,39 @@ void threadSimulation(thread_userdata* userdata) {
 
 void threadRailnetworkSimulation(rn_thread_userdata* userdata) {
 	lua_State* L = userdata->L;
-	boost::chrono::process_real_cpu_clock::time_point p = boost::chrono::process_real_cpu_clock::now();
+	boost::chrono::steady_clock::time_point p = boost::chrono::steady_clock::now();
 
-	while (userdata && !userdata->finished) {
+	while (userdata && !userdata->finished.load()) {
 		lua_settop(L,0);
 
 		//Simulate one step
-		if (userdata->current_time < target_time) {
-			userdata->current_time = target_time;
+		if (userdata->current_time < target_time.load()) {
+			userdata->current_time = target_time.load();
 			lua_pushnumber(L, userdata->current_time);
 			lua_setglobal(L,"CurrentTime");
 			
-			lua_newtable(L);
-			for each (auto var in trains_pos)
+			// snapshot positions under shared lock
+			struct TrainPos { int id; float x; float y; float z; };
+			std::vector<TrainPos> snapshot;
 			{
+				boost::shared_lock<boost::shared_mutex> lock(trains_pos_mutex);
+				snapshot.reserve(trains_pos.size());
+				for (boost::unordered_map<int, IServerNetworkable*>::const_iterator it = trains_pos.begin(); it != trains_pos.end(); ++it)
+				{
+					float* pos = it->second->GetPVSInfo()->m_vCenter;
+					TrainPos tp; tp.id = it->first; tp.x = pos[0]; tp.y = pos[1]; tp.z = pos[2];
+					snapshot.push_back(tp);
+				}
+			}
+
+			lua_newtable(L);
+			for (size_t i = 0; i < snapshot.size(); ++i) {
+				const TrainPos &tp = snapshot[i];
 				lua_createtable(L, 0, 3);
-				float* pos = var.second->GetPVSInfo()->m_vCenter;
-				lua_pushnumber(L, pos[0]);			lua_rawseti(L, -2, 1);
-				lua_pushnumber(L, pos[1]);			lua_rawseti(L, -2, 2);
-				lua_pushnumber(L, pos[2]);			lua_rawseti(L, -2, 3);
-				lua_rawseti(L, -2, var.first);
+				lua_pushnumber(L, tp.x); lua_rawseti(L, -2, 1);
+				lua_pushnumber(L, tp.y); lua_rawseti(L, -2, 2);
+				lua_pushnumber(L, tp.z); lua_rawseti(L, -2, 3);
+				lua_rawseti(L, -2, tp.id);
 			}
 			lua_setglobal(L, "TrainsPos");
 
@@ -392,7 +414,14 @@ void threadRailnetworkSimulation(rn_thread_userdata* userdata) {
 void load(GarrysMod::Lua::ILuaBase* LUA, lua_State* L, char* filename, char* path, char* variable = NULL, char* defpath = NULL, bool json = false) {
 	//Load up "sv_turbostroi.lua" in the new JIT environment
 	const char* file_data = NULL;
-	auto cache_item = load_files_cache.find(filename);
+	std::string cache_key;
+	if (path) {
+		cache_key.reserve(strlen(path) + 1 + strlen(filename));
+		cache_key.append(path).append(1, '|').append(filename);
+	} else {
+		cache_key = filename;
+	}
+	auto cache_item = load_files_cache.find(cache_key);
 	if (cache_item != load_files_cache.end()) {
 		file_data = cache_item->second.c_str();
 	}
@@ -405,7 +434,7 @@ void load(GarrysMod::Lua::ILuaBase* LUA, lua_State* L, char* filename, char* pat
 		LUA->Call(2, 1); //file.Read(...)
 		if (LUA->GetString(-1)) {
 			file_data = LUA->GetString(-1);
-			load_files_cache.emplace(filename, file_data);
+			load_files_cache.emplace(cache_key, file_data);
 		}
 		LUA->Pop(); //returned result
 		LUA->Pop(); //file
@@ -470,7 +499,8 @@ void load(GarrysMod::Lua::ILuaBase* LUA, lua_State* L, char* filename, char* pat
 				LUA->Pop(); //GLOB
 			}
 		}
-	} else {
+	}
+	else {
 		char Message[512] = { 0 };
 		if (!defpath) {
 			std::sprintf(Message, "Turbostroi: File not found! ('%s' in '%s' path)\n", filename, path);
@@ -503,7 +533,10 @@ LUA_FUNCTION( API_InitializeTrain )
 	EntHandle = (CBaseHandle*)LUA->GetUserType<CBaseHandle>(1, Type::Entity);
 	edict_t* EntityEdict = engineServer->PEntityOfEntIndex(EntHandle->GetEntryIndex());
 	Entity = EntityEdict->GetNetworkable();
-	trains_pos.insert(std::pair<int, IServerNetworkable*>(EntHandle->GetEntryIndex(), Entity));
+	{
+		boost::unique_lock<boost::shared_mutex> lock(trains_pos_mutex);
+		trains_pos.insert(std::pair<int, IServerNetworkable*>(EntHandle->GetEntryIndex(), Entity));
+	}
 
 	//Get current time
 	LUA->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
@@ -566,7 +599,7 @@ LUA_FUNCTION( API_InitializeTrain )
 
 	//New userdata
 	thread_userdata* userdata = new thread_userdata();
-	userdata->finished = 0;
+	userdata->finished.store(false);
 	userdata->L = L;
 	userdata->current_time = curtime;
 	LUA->PushUserType(userdata, 1);
@@ -590,12 +623,15 @@ LUA_FUNCTION( API_DeinitializeTrain )
 	CBaseHandle* EntHandle;
 	//Get entity index
 	EntHandle = (CBaseHandle*)LUA->GetUserType<CBaseHandle>(1, Type::Entity);
-	trains_pos.erase(EntHandle->GetEntryIndex());
+	{
+		boost::unique_lock<boost::shared_mutex> lock(trains_pos_mutex);
+		trains_pos.erase(EntHandle->GetEntryIndex());
+	}
 	//End RailNetwork
 
 	LUA->GetField(1,"_sim_userdata");
 	thread_userdata* userdata = LUA->GetUserType<thread_userdata>(-1, 1);
-	if (userdata) userdata->finished = 1;
+	if (userdata) userdata->finished.store(true);
 	LUA->Pop();
 
 	LUA->PushNil();
@@ -651,7 +687,7 @@ int API_InitializeRailnetwork(ILuaBase* LUA) {
 
 	//New userdata
 	rn_thread_userdata* userdata = new rn_thread_userdata();
-	userdata->finished = 0;
+	userdata->finished.store(false);
 	userdata->L = L;
 	userdata->current_time = curtime;
 	rn_userdata = userdata;
@@ -668,7 +704,7 @@ int API_InitializeRailnetwork(ILuaBase* LUA) {
 
 int API_DeinitializeRailnetwork(ILuaBase* LUA)
 {
-	if (rn_userdata) rn_userdata->finished = 1;
+	if (rn_userdata) rn_userdata->finished.store(true);
 
 	return 0;
 }
@@ -695,7 +731,7 @@ LUA_FUNCTION( API_RegisterSystem )
 		LUA->Call(1,0);
 		LUA->Pop();
 
-	
+		
 		strncat(metrostroiSystemsList,LUA->GetString(1),131071);
 		strncat(metrostroiSystemsList,"\n",131071);
 		strncat(metrostroiSystemsList,LUA->GetString(2),131071);
@@ -878,9 +914,9 @@ LUA_FUNCTION( API_StartRailNetwork )
 //------------------------------------------------------------------------------
 SH_DECL_HOOK1_void(IServerGameDLL, Think, SH_NOATTRIB, 0, bool);
 static void Think_handler(bool finalTick) {
-	target_time = globalvars->curtime;
+	target_time.store(globalvars->curtime);
 	shared_message msg;
-	if (printMessages.pop(msg)) {
+	while (printMessages.pop(msg)) {
 		ConColorMsg(Color(255, 0, 255), msg.message);
 	}
 }

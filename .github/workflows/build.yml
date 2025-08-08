@@ -1,0 +1,114 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  windows-msvc:
+    name: Windows MSVC x64
+    runs-on: windows-latest
+    env:
+      GARRYSMOD_COMMON: ${{ github.workspace }}\external\garrysmod_common-x86-64
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Download premake5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $premakeUrl = 'https://github.com/premake/premake-core/releases/download/v5.0.0-alpha16/premake-5.0.0-alpha16-windows.zip'
+          Invoke-WebRequest -Uri $premakeUrl -OutFile premake5.zip
+          Expand-Archive premake5.zip -DestinationPath premake5_bin
+          Copy-Item premake5_bin\premake5.exe premake5.exe -Force
+          Push-Location $env:RUNNER_TEMP
+          & "$env:GITHUB_WORKSPACE\premake5.exe" --version
+          Pop-Location
+
+      - name: Generate Visual Studio solution
+        shell: pwsh
+        run: |
+          $env:GARRYSMOD_COMMON = "$env:GITHUB_WORKSPACE\external\garrysmod_common-x86-64"
+          & "$env:GITHUB_WORKSPACE\premake5.exe" --file=premake5.lua vs2019
+
+      - name: Locate solution
+        id: sln
+        shell: pwsh
+        run: |
+          $sln = Get-ChildItem -Path projects\windows -Recurse -Filter *.sln | Select-Object -First 1
+          if (-not $sln) { throw 'Solution file not found under projects\windows' }
+          echo "sln=$($sln.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Normalize NuGet version suffix in vcxproj
+        shell: pwsh
+        run: |
+          $projDir = Split-Path "${{ steps.sln.outputs.sln }}" -Parent
+          Get-ChildItem -Path $projDir -Recurse -Filter *.vcxproj | ForEach-Object {
+            $p = $_.FullName
+            (Get-Content $p -Raw) -replace '\.1\.71\.0\.0', '.1.71.0' | Set-Content -Encoding UTF8 $p
+          }
+
+      - name: Restore NuGet packages
+        shell: pwsh
+        run: |
+          $sln = "${{ steps.sln.outputs.sln }}"
+          $sd = Split-Path $sln -Parent
+          $pkgRoot = Join-Path $sd 'packages'
+          New-Item -ItemType Directory -Force -Path $pkgRoot | Out-Null
+          nuget restore "$sln" -NonInteractive -SolutionDirectory "$sd" -PackagesDirectory "$pkgRoot"
+
+      - name: Fix boost targets path if missing
+        shell: pwsh
+        run: |
+          $sln = "${{ steps.sln.outputs.sln }}"
+          $sd = Split-Path $sln -Parent
+          $pkgRoot = Join-Path $sd 'packages'
+          $dst = Join-Path $pkgRoot 'boost-vc142.1.71.0\build\native\boost-vc142.targets'
+          if (-not (Test-Path $dst)) {
+            $src = Get-ChildItem -Path (Join-Path $env:USERPROFILE '.nuget\packages\boost-vc142\1.71.0') -Recurse -Filter boost-vc142.targets -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($src) {
+              New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent) | Out-Null
+              Copy-Item -Path $src.FullName -Destination $dst -Force
+            }
+          }
+          if (-not (Test-Path $dst)) {
+            Write-Host "boost-vc142.targets still missing at $dst; listing package folder:"
+            Get-ChildItem -Recurse -Depth 4 -Path (Join-Path $pkgRoot 'boost-vc142.1.71.0') | Select-Object FullName
+            throw "Missing boost-vc142.targets after restore"
+          }
+
+      - name: Build (Release x64)
+        shell: pwsh
+        run: |
+          $sln = "${{ steps.sln.outputs.sln }}"
+          $sd = Split-Path $sln -Parent
+          $pkgRoot = Join-Path $sd 'packages'
+          msbuild "$sln" /m /p:Configuration=Release /p:Platform=x64 /p:RestorePackagesPath="$pkgRoot" /verbosity:minimal
+
+      - name: Collect artifacts
+        id: collect
+        shell: pwsh
+        run: |
+          $dlls = Get-ChildItem -Path . -Recurse -Include gmsv_*.dll, *.dll | Where-Object { $_.FullName -match '\\(x64|Release|bin|build)\\' }
+          if (-not $dlls) { Write-Host 'No DLLs found; listing tree for debug'; Get-ChildItem -Recurse -Depth 4 | Select-Object FullName; }
+          $out = Join-Path $env:RUNNER_TEMP 'artifacts'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          foreach ($d in $dlls) { Copy-Item $d.FullName -Destination $out -Force }
+          echo "out=$out" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmsv_turbostroi-windows-x64
+          path: ${{ steps.collect.outputs.out }}
+          if-no-files-found: warn
