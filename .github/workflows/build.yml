@@ -67,6 +67,26 @@ jobs:
           New-Item -ItemType Directory -Force -Path $pkgRoot | Out-Null
           nuget restore "$sln" -NonInteractive -SolutionDirectory "$sd" -PackagesDirectory "$pkgRoot"
 
+      - name: Fix boost targets path if missing
+        shell: pwsh
+        run: |
+          $sln = "${{ steps.sln.outputs.sln }}"
+          $sd = Split-Path $sln -Parent
+          $pkgRoot = Join-Path $sd 'packages'
+          $dst = Join-Path $pkgRoot 'boost-vc142.1.71.0\build\native\boost-vc142.targets'
+          if (-not (Test-Path $dst)) {
+            $src = Get-ChildItem -Path (Join-Path $env:USERPROFILE '.nuget\packages\boost-vc142\1.71.0') -Recurse -Filter boost-vc142.targets -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($src) {
+              New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent) | Out-Null
+              Copy-Item -Path $src.FullName -Destination $dst -Force
+            }
+          }
+          if (-not (Test-Path $dst)) {
+            Write-Host "boost-vc142.targets still missing at $dst; listing package folder:"
+            Get-ChildItem -Recurse -Depth 4 -Path (Join-Path $pkgRoot 'boost-vc142.1.71.0') | Select-Object FullName
+            throw "Missing boost-vc142.targets after restore"
+          }
+
       - name: Build (Release x64)
         shell: pwsh
         run: |
