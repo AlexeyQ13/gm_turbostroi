@@ -67,14 +67,11 @@ jobs:
             }
           }
 
-          $pkgTargets = @(
-            (Join-Path $pkgRoot 'boost-vc142.1.71.0.0\build\native\boost-vc142.targets'),
-            (Join-Path $pkgRoot 'boost-vc142.1.71.0\build\native\boost-vc142.targets')
-          )
-          if (-not ($pkgTargets | Where-Object { Test-Path $_ })) {
+          $pkgTargets = Get-ChildItem -Path $pkgRoot -Recurse -Filter boost-vc142.targets -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $pkgTargets) {
             Write-Host 'NuGet packages directory content:'
             Get-ChildItem -Recurse -Depth 3 -Path $pkgRoot | Select-Object FullName
-            throw "NuGet restore did not produce expected Boost targets (checked: $($pkgTargets -join ', '))"
+            throw 'NuGet restore did not produce expected Boost targets under solution packages folder'
           }
 
       - name: Build (Release x64)
