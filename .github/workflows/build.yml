@@ -62,8 +62,20 @@ jobs:
           foreach ($p in $pkgs) {
             $p170  = Join-Path $pkgRoot ($p + '.1.71.0')
             $p1700 = Join-Path $pkgRoot ($p + '.1.71.0.0')
+
+            # Ensure 1.71.0 exists under solution packages (copy from user cache if needed)
+            if (-not (Test-Path $p170)) {
+              $srcPref = Join-Path $env:USERPROFILE ".nuget\packages\$p\1.71.0"
+              if (Test-Path $srcPref) {
+                New-Item -ItemType Directory -Force -Path $p170 | Out-Null
+                Copy-Item -Path (Join-Path $srcPref '*') -Destination $p170 -Recurse -Force
+              }
+            }
+
+            # Provide 1.71.0.0 directory by copying (avoid junction permissions)
             if ((Test-Path $p170) -and -not (Test-Path $p1700)) {
-              New-Item -ItemType Junction -Path $p1700 -Target $p170 | Out-Null
+              New-Item -ItemType Directory -Force -Path $p1700 | Out-Null
+              Copy-Item -Path (Join-Path $p170 '*') -Destination $p1700 -Recurse -Force
             }
           }
 
