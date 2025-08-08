@@ -1,0 +1,76 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  windows-msvc:
+    name: Windows MSVC x64
+    runs-on: windows-latest
+    env:
+      GARRYSMOD_COMMON: ${{ github.workspace }}\external\garrysmod_common-x86-64
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Download premake5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $premakeUrl = 'https://github.com/premake/premake-core/releases/download/v5.0.0-alpha16/premake-5.0.0-alpha16-windows.zip'
+          Invoke-WebRequest -Uri $premakeUrl -OutFile premake5.zip
+          Expand-Archive premake5.zip -DestinationPath premake5_bin
+          Copy-Item premake5_bin\premake5.exe premake5.exe -Force
+          ./premake5.exe --version
+
+      - name: Generate Visual Studio solution
+        shell: pwsh
+        run: |
+          $env:GARRYSMOD_COMMON = "$env:GITHUB_WORKSPACE\external\garrysmod_common-x86-64"
+          ./premake5.exe --file=premake5.lua vs2022
+
+      - name: Locate solution
+        id: sln
+        shell: pwsh
+        run: |
+          $sln = Get-ChildItem -Path projects\windows -Recurse -Filter *.sln | Select-Object -First 1
+          if (-not $sln) { throw 'Solution file not found under projects\\windows' }
+          echo "sln=$($sln.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Restore NuGet packages
+        shell: pwsh
+        run: |
+          nuget restore "${{ steps.sln.outputs.sln }}"
+
+      - name: Build (Release x64)
+        shell: pwsh
+        run: |
+          msbuild "${{ steps.sln.outputs.sln }}" /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+
+      - name: Collect artifacts
+        id: collect
+        shell: pwsh
+        run: |
+          $dlls = Get-ChildItem -Path . -Recurse -Include gmsv_*.dll, *.dll | Where-Object { $_.FullName -match '\\(x64|Release|bin|build)\\' }
+          if (-not $dlls) { Write-Host 'No DLLs found; listing tree for debug'; Get-ChildItem -Recurse -Depth 4 | Select-Object FullName; }
+          $out = Join-Path $env:RUNNER_TEMP 'artifacts'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          foreach ($d in $dlls) { Copy-Item $d.FullName -Destination $out -Force }
+          echo "out=$out" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmsv_turbostroi-windows-x64
+          path: ${{ steps.collect.outputs.out }}
+          if-no-files-found: warn
