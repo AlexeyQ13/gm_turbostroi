@@ -49,6 +49,15 @@ jobs:
           if (-not $sln) { throw 'Solution file not found under projects\windows' }
           echo "sln=$($sln.FullName)" >> $env:GITHUB_OUTPUT
 
+      - name: Normalize NuGet version suffix in vcxproj
+        shell: pwsh
+        run: |
+          $projDir = Split-Path "${{ steps.sln.outputs.sln }}" -Parent
+          Get-ChildItem -Path $projDir -Recurse -Filter *.vcxproj | ForEach-Object {
+            $p = $_.FullName
+            (Get-Content $p -Raw) -replace '\.1\.71\.0\.0', '.1.71.0' | Set-Content -Encoding UTF8 $p
+          }
+
       - name: Restore NuGet packages
         shell: pwsh
         run: |
