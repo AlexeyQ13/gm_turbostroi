@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           $env:GARRYSMOD_COMMON = "$env:GITHUB_WORKSPACE\external\garrysmod_common-x86-64"
-          & "$env:GITHUB_WORKSPACE\premake5.exe" --file=premake5.lua vs2022
+          & "$env:GITHUB_WORKSPACE\premake5.exe" --file=premake5.lua vs2019
 
       - name: Locate solution
         id: sln
