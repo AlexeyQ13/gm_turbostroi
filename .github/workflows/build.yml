@@ -55,11 +55,26 @@ jobs:
           $sln = "${{ steps.sln.outputs.sln }}"
           $sd = Split-Path $sln -Parent
           nuget restore "$sln" -NonInteractive -SolutionDirectory "$sd" -PackagesDirectory "$sd\packages"
-          $pkgTargets = Join-Path $sd 'packages\boost-vc142.1.71.0.0\build\native\boost-vc142.targets'
-          if (-not (Test-Path $pkgTargets)) {
+
+          # Fix: some projects expect 1.71.0.0 while NuGet lays out as 1.71.0
+          $pkgRoot = Join-Path $sd 'packages'
+          $pkgs = @('boost-vc142','boost_thread-vc142','boost_date_time-vc142','boost_chrono-vc142','boost_atomic-vc142','boost')
+          foreach ($p in $pkgs) {
+            $p170  = Join-Path $pkgRoot ($p + '.1.71.0')
+            $p1700 = Join-Path $pkgRoot ($p + '.1.71.0.0')
+            if ((Test-Path $p170) -and -not (Test-Path $p1700)) {
+              New-Item -ItemType Junction -Path $p1700 -Target $p170 | Out-Null
+            }
+          }
+
+          $pkgTargets = @(
+            (Join-Path $pkgRoot 'boost-vc142.1.71.0.0\build\native\boost-vc142.targets'),
+            (Join-Path $pkgRoot 'boost-vc142.1.71.0\build\native\boost-vc142.targets')
+          )
+          if (-not ($pkgTargets | Where-Object { Test-Path $_ })) {
             Write-Host 'NuGet packages directory content:'
-            Get-ChildItem -Recurse -Depth 3 -Path (Join-Path $sd 'packages') | Select-Object FullName
-            throw "NuGet restore did not produce expected Boost targets at $pkgTargets"
+            Get-ChildItem -Recurse -Depth 3 -Path $pkgRoot | Select-Object FullName
+            throw "NuGet restore did not produce expected Boost targets (checked: $($pkgTargets -join ', '))"
           }
 
       - name: Build (Release x64)
