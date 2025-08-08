@@ -46,7 +46,7 @@ jobs:
         shell: pwsh
         run: |
           $sln = Get-ChildItem -Path projects\windows -Recurse -Filter *.sln | Select-Object -First 1
-          if (-not $sln) { throw 'Solution file not found under projects\\windows' }
+          if (-not $sln) { throw 'Solution file not found under projects\windows' }
           echo "sln=$($sln.FullName)" >> $env:GITHUB_OUTPUT
 
       - name: Restore NuGet packages
@@ -54,42 +54,17 @@ jobs:
         run: |
           $sln = "${{ steps.sln.outputs.sln }}"
           $sd = Split-Path $sln -Parent
-          nuget restore "$sln" -NonInteractive -SolutionDirectory "$sd" -PackagesDirectory "$sd\packages"
-
-          # Fix: some projects expect 1.71.0.0 while NuGet lays out as 1.71.0
           $pkgRoot = Join-Path $sd 'packages'
-          $pkgs = @('boost-vc142','boost_thread-vc142','boost_date_time-vc142','boost_chrono-vc142','boost_atomic-vc142','boost')
-          foreach ($p in $pkgs) {
-            $p170  = Join-Path $pkgRoot ($p + '.1.71.0')
-            $p1700 = Join-Path $pkgRoot ($p + '.1.71.0.0')
-
-            # Ensure 1.71.0 exists under solution packages (copy from user cache if needed)
-            if (-not (Test-Path $p170)) {
-              $srcPref = Join-Path $env:USERPROFILE ".nuget\packages\$p\1.71.0"
-              if (Test-Path $srcPref) {
-                New-Item -ItemType Directory -Force -Path $p170 | Out-Null
-                Copy-Item -Path (Join-Path $srcPref '*') -Destination $p170 -Recurse -Force
-              }
-            }
-
-            # Provide 1.71.0.0 directory by copying (avoid junction permissions)
-            if ((Test-Path $p170) -and -not (Test-Path $p1700)) {
-              New-Item -ItemType Directory -Force -Path $p1700 | Out-Null
-              Copy-Item -Path (Join-Path $p170 '*') -Destination $p1700 -Recurse -Force
-            }
-          }
-
-          $pkgTargets = Get-ChildItem -Path $pkgRoot -Recurse -Filter boost-vc142.targets -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $pkgTargets) {
-            Write-Host 'NuGet packages directory content:'
-            Get-ChildItem -Recurse -Depth 3 -Path $pkgRoot | Select-Object FullName
-            throw 'NuGet restore did not produce expected Boost targets under solution packages folder'
-          }
+          New-Item -ItemType Directory -Force -Path $pkgRoot | Out-Null
+          nuget restore "$sln" -NonInteractive -SolutionDirectory "$sd" -PackagesDirectory "$pkgRoot"
 
       - name: Build (Release x64)
         shell: pwsh
         run: |
-          msbuild "${{ steps.sln.outputs.sln }}" /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          $sln = "${{ steps.sln.outputs.sln }}"
+          $sd = Split-Path $sln -Parent
+          $pkgRoot = Join-Path $sd 'packages'
+          msbuild "$sln" /m /p:Configuration=Release /p:Platform=x64 /p:RestorePackagesPath="$pkgRoot" /verbosity:minimal
 
       - name: Collect artifacts
         id: collect
