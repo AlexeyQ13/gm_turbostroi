@@ -73,6 +73,8 @@ jobs:
           $sln = "${{ steps.sln.outputs.sln }}"
           $sd = Split-Path $sln -Parent
           $pkgRoot = Join-Path $sd 'packages'
+          
+          # Fix boost-vc142.targets
           $dst = Join-Path $pkgRoot 'boost-vc142.1.71.0\build\native\boost-vc142.targets'
           if (-not (Test-Path $dst)) {
             $src = Get-ChildItem -Path (Join-Path $env:USERPROFILE '.nuget\packages\boost-vc142\1.71.0') -Recurse -Filter boost-vc142.targets -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -85,6 +87,21 @@ jobs:
             Write-Host "boost-vc142.targets still missing at $dst; listing package folder:"
             Get-ChildItem -Recurse -Depth 4 -Path (Join-Path $pkgRoot 'boost-vc142.1.71.0') | Select-Object FullName
             throw "Missing boost-vc142.targets after restore"
+          }
+          
+          # Fix boost.targets
+          $boostDst = Join-Path $pkgRoot 'boost.1.71.0\build\native\boost.targets'
+          if (-not (Test-Path $boostDst)) {
+            $boostSrc = Get-ChildItem -Path (Join-Path $env:USERPROFILE '.nuget\packages\boost\1.71.0') -Recurse -Filter boost.targets -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($boostSrc) {
+              New-Item -ItemType Directory -Force -Path (Split-Path $boostDst -Parent) | Out-Null
+              Copy-Item -Path $boostSrc.FullName -Destination $boostDst -Force
+            }
+          }
+          if (-not (Test-Path $boostDst)) {
+            Write-Host "boost.targets still missing at $boostDst; listing package folder:"
+            Get-ChildItem -Recurse -Depth 4 -Path (Join-Path $pkgRoot 'boost.1.71.0') | Select-Object FullName
+            throw "Missing boost.targets after restore"
           }
 
       - name: Build (Release x64)
