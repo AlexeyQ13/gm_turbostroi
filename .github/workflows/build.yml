@@ -115,6 +115,35 @@ jobs:
               throw "Missing $($package.TargetsFile) after restore"
             }
           }
+          
+          # Fix Boost include paths - copy from global NuGet cache to packages directory
+          Write-Host "Setting up Boost include directories..."
+          $globalBoostPath = Join-Path $env:USERPROFILE '.nuget\packages\boost\1.71.0'
+          $boostIncludeDst = Join-Path $pkgRoot 'boost.1.71.0'
+          
+          if (Test-Path $globalBoostPath) {
+            # Copy the entire package from global cache to local packages directory
+            if (-not (Test-Path $boostIncludeDst)) {
+              Write-Host "Copying Boost package from global cache to local packages directory..."
+              Copy-Item -Path $globalBoostPath -Destination $boostIncludeDst -Recurse -Force
+              Write-Host "Successfully copied Boost package to $boostIncludeDst"
+            } else {
+              Write-Host "Boost package already exists in local packages directory"
+              # Check if include directory exists, if not copy it
+              $includeCheck = Get-ChildItem -Path $boostIncludeDst -Recurse -Filter "boost" -Directory -ErrorAction SilentlyContinue
+              if (-not $includeCheck) {
+                Write-Host "Include directory missing, copying from global cache..."
+                $srcLib = Join-Path $globalBoostPath "lib"
+                $dstLib = Join-Path $boostIncludeDst "lib"
+                if (Test-Path $srcLib) {
+                  Copy-Item -Path $srcLib -Destination $dstLib -Recurse -Force
+                  Write-Host "Successfully copied include files"
+                }
+              }
+            }
+          } else {
+            Write-Host "Warning: Could not find Boost package in global NuGet cache at $globalBoostPath"
+          }
 
       - name: Build (Release x64)
         shell: pwsh
