@@ -24,13 +24,21 @@ CreateProject({
     --source_path = project_source_path -- optional
 })
 
-files { "source/gmsv_turbostroi_win32.rc",
-"external/metamod-source/core/sourcehook/sourcehook.cpp",
-"external/metamod-source/core/sourcehook/sourcehook_hookmangen.cpp",
-"external/metamod-source/core/sourcehook/sourcehook_impl_chookidman.cpp",
-"external/metamod-source/core/sourcehook/sourcehook_impl_chookmaninfo.cpp",
-"external/metamod-source/core/sourcehook/sourcehook_impl_cproto.cpp",
-"external/metamod-source/core/sourcehook/sourcehook_impl_cvfnptr.cpp" }
+files {
+    -- Windows resource only added under filter below
+    "external/metamod-source/core/sourcehook/sourcehook.cpp",
+    "external/metamod-source/core/sourcehook/sourcehook_hookmangen.cpp",
+    "external/metamod-source/core/sourcehook/sourcehook_impl_chookidman.cpp",
+    "external/metamod-source/core/sourcehook/sourcehook_impl_chookmaninfo.cpp",
+    "external/metamod-source/core/sourcehook/sourcehook_impl_cproto.cpp",
+    "external/metamod-source/core/sourcehook/sourcehook_impl_cvfnptr.cpp"
+}
+
+-- Windows-only resource file
+filter({"system:windows"})
+    files { "source/gmsv_turbostroi_win32.rc" }
+filter({})
+
 nuget { "boost-vc142:1.71.0", "boost:1.71.0", "boost_thread-vc142:1.71.0", "boost_date_time-vc142:1.71.0", "boost_chrono-vc142:1.71.0", "boost_atomic-vc142:1.71.0" }
 removefiles { "source/guicon.cpp", "source/guicon.h" }
 sysincludedirs { "external/gmod-module-base/include", "external/luajit", "external/metamod-source/core/sourcehook" }
@@ -40,20 +48,19 @@ removesysincludedirs { "external/garrysmod_common-x86-64/include", "external/gar
 sysincludedirs { "external/garrysmod_common-x86-64/include", "external/garrysmod_common-x86-64/helpers/include" }
 
 filter({"system:windows", "architecture:x86"})
-	libdirs("external/luajit/x86")
-	
-filter({"system:windows", "architecture:x86_64"})
-	libdirs("external/luajit/x64")
+    libdirs("external/luajit/x86")
+    links("lua51", "luajit")
 
-filter("system:windows or macosx")
-	links("lua51", "luajit")
+filter({"system:windows", "architecture:x86_64"})
+    libdirs("external/luajit/x64")
+    links("lua51", "luajit")
 
 filter({"system:linux", "architecture:x86"})
-	libdirs("external/luajit/linux32")
-	links("lua51", "luajit")
+    libdirs("external/luajit/linux32")
+    links({"lua51", "luajit", "boost_thread", "boost_chrono", "boost_atomic"})
 
 filter({"system:linux", "architecture:x86_64"})
-	links("lua51", "luajit")
+    links({"lua51", "luajit", "boost_thread", "boost_chrono", "boost_atomic"})
 
 filter({})
 
@@ -67,6 +74,6 @@ IncludeSDKTier0()
 IncludeSDKTier1()
 --IncludeSDKTier2()
 --IncludeSDKTier3()
-IncludeSDKMathlib()
+-- IncludeSDKMathlib() -- disabled to avoid external build errors on linux
 --IncludeSDKRaytrace()
 --IncludeSteamAPI()
